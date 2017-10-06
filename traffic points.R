@@ -2,84 +2,114 @@ require(ggmap)
 require(stringr)
 require(dplyr)
 require(DBI)
+require(purrr)
+require(RMySQL)
+require(magick)
 
-map_points <- function(df, start_time, map, date) {
-  
-  #st <- str_pad(start_time, width = 4, side = 'left', pad = '0')
-  fin <- str_pad(as.character(as.numeric(start_time)+100), width = 4, side = 'left', pad = '0')
-  dur <- paste0(start_time,'-',fin,' ',date)
-
-  #col_fill <- paste('traffic_volume_counted_after',st,'to',fin,sep='_')
-  col_fill <- labels[start_time]
-  
-  df <- df %>% filter(Date == date)
-  #print(col_fill) #debugging
-# plotting the map with some points on it
-  x <- ggmap(mapgilbert) +
-    geom_point(data = df, aes_string(x = 'Longitude', y = 'Latitude', fill = col_fill, alpha = 0.4), size = 3, shape = 21) +
-    guides(fill=FALSE, alpha=FALSE, size=FALSE) + 
-    scale_fill_gradient2(low = 'red', mid = 'white', high = 'blue') +
-    ggtitle(dur)
-    #geom_text(aes_string(x = -75.2, y = 35.2, label = 'avc'), size = 3, alpha = 1, color = 'black')
-}
-
-#maybe we need to keep the state with the observations
+#Minimal statement for joining the observation and station tables
 
 obs.stat.join <- 'where A.StationID = B.StationID and A.DirectionOfTravel = B.DirectionOfTravel and A.LaneOfTravel = B.LaneOfTravel'
-
-#possible args:
-#stationid, date, time, fipsstate, fipscounty, postedsigning, postedsignnumber
-map_sql_pts <- function(map, ...) {
-  args <- list(...)
-  
-  sql.str <- paste0('select B.Latitude, B.Longitude, B.StationID, A.', labels[start_time], ', B.Date from traffic.observation A, traffic.station B ', obs.stat.join, ' and A.Date = \'', date, '\';')
-}
-
-#mapgilbert <- get_map(location = c(lon = mean(va$Longitude, na.rm=TRUE), lat = mean(va$Latitude,na.rm=TRUE)), zoom = 7,
-#                      maptype = "roadmap", scale = 2)
+mydb <- dbConnect(MySQL(), user = 'root', password = pwd)
 
 labels <- c('HourOne', 'HourTwo', 'HourThree', 'HourFour', 'HourFive', 'HourSix', 'HourSeven', 'HourEight', 'HourNine', 'HourTen', 'HourEleven', 'HourTwelve', 'HourThirteen', 'HourFourteen', 'HourFifteen', 'HourSixteen', 'HourSeventeen', 'HourEighteen', 'HourNineteen', 'HourTwenty', 'HourTwentyOne', 'HourTwentyTwo', 'HourTwentyThree', 'HourTwentyFour')
 names(labels) <- seq(0000,2300,100)
 names(labels) <- str_pad(names(labels), width = 4, pad = '0', side = 'left')
 
-get_plots <- function(df, map) {
-  times <- seq(0000,2300,100)
-  dates <- paste('2015-01-',str_pad(seq('01','31'),2,'left','0'),sep='')
+#possible args:
+#stationid, date, time, fipsstate, fipscounty, postedsigning, postedsignnumber
+#Returns a dataframe of traffic observations, filtered by arguments passed to ...
+get_sql_pts <- function(conn = mydb, ...) {
+  args <- list(...)
+  params <- c('StationID', 'Date', 'time', 'FIPSState', 'FIPSCounty', 'PostedSigning', 'PostedSignNumber')
+  stat.sel.str <- paste0('select B.Latitude, B.Longitude, B.FIPSState, B.FIPSCounty, ')# from traffic.observation A, traffic.station B ', obs.stat.join, ' and A.Date = \'', date, '\';')
+  from.str <- 'from traffic.observation A, traffic.station B '
+  exists <- map_lgl(params, ~!is.null(args[[.]]))
+  names(exists) <- params
+  obs.str <- ''
   
-  #jan <- df %>% filter(month_of_data == '01')
-  
-  days <- list()
-  for (i in 1:length(dates)) {
-    today <- df %>% filter(date == dates[i])
-    days[[i]] <- map(times, ~map_points(today, .x, map, dates[i]))
-    assign(paste0('day',i),map(times, ~map_points(today, .x, map, dates[i])))
-  }
-  #print(day1[[1]])
-  return(days)
-  #return(list(day1,day2,day3,day4,day5,day6,day7,day8,day9,day10,day11,day12,day13,day14,day15,day16,day17,day18,day19,day20,day21,day22,day23,day24,day25,day26,day27,day28,day29,day30,day31))
-}
-
-#copied directly from a blank script
-#needs to be fixed
-print_maps <- functon() {
-  #jan <- whole %>% filter(month_of_data == '01')
-  
-  for (i in 1:length(test)) {
-    walk2(.x = test[[i]], .y = seq(test[[i]]), .f = ~ggsave(paste('plot','-',i,'-',str_pad(as.character(.y),3,side='left',pad='0'),'.png',sep=''),.x))
+  if(exists['time']) {
+    obs.str <- paste0(' A.StationID, A.', labels[args$time], ', A.Date ')
+  } else {
+    obs.str <- ' A.* '
   }
   
-  #setup for traffic stuff
-  #let stat be station data, obs be the observations, in whichever form
-  stat$longitude <- stat$longitude * -1 #right hemisphere
+  short.args <- exists[exists]
+  short.args <- short.args[names(short.args) != 'time']
   
+  if (exists['FIPSState']) {
+    if (is.na(strtoi(args[['FIPSState']]))) {
+      args[['FIPSState']] <- unique(fips.tbl$STATE_CODE[fips.tbl$STATE_ABBREV == args[['FIPSState']]]) %>% str_pad(width = 2, pad = '0', side = 'left')
+    }
+  }
+  
+  if (exists['FIPSCounty']) {
+    if (is.na(strtoi(args[['FIPSCounty']]))) {
+      args[['FIPSCounty']] <- unique(fips.tbl$COUNTY_CODE[fips.tbl$COUNTY_NAME == args[['FIPSCounty']] & fips.tbl$STATE_CODE == args[['FIPSState']]]) %>% str_pad(width = 3, pad = '0', side = 'left')
+    }
+  }
+  
+  args.str <- ' and '
+  for (arg in names(short.args)) {
+    args.str <- paste0(args.str, arg, ' = \'', args[[arg]], '\' and ')
+  }
+  
+  args.str <- gsub(' and $', ';', args.str)
+  
+  query <- paste0(stat.sel.str, obs.str, from.str, obs.stat.join, args.str)
+  
+  df <- dbGetQuery(conn, query)
+  
+  return(df)
 }
 
-###################
+#Plot one snapshot of traffic on a map
+#Defaults to HourOne (midnight - 1am)
+#Will be expanded
+traf_map <- function(map, data, col = 'HourOne') {
+  dt <- min(unique(data$Date))
+  name <- names(labels)[labels == col]
+  base <- ggmap(map, extent = 'normal')
+  base + 
+    stat_summary_2d(data = data, aes_string(x = 'Longitude', y = 'Latitude', z = col), fun = mean, binwidth = c(.075, .075)) + 
+    scale_fill_gradientn(name = 'Traffic', colors = rev(rainbow(7)), trans = 'log10', limits = c(NA, 6500)) + 
+    scale_alpha(range = c(0, 0.3), guide = FALSE) + 
+    coord_map(projection='mercator',
+              xlim=c(attr(map, "bb")$ll.lon, attr(map, "bb")$ur.lon),
+              ylim=c(attr(map, "bb")$ll.lat, attr(map, "bb")$ur.lat)) + 
+    ggtitle(paste(dt,name))
+}
+
+#Take in a list of plots to save
+write_maps <- function(src) {
+  walk2(src, letters[1:length(src)], ~ggsave(filename = paste0('~/blank/map',.y,'.png'), plot = .x))
+}
+
+base_map <- function(data) {
+  long <- mean(data$Longitude, na.rm = T) #We're assuming data comes straight from SQL, so this is the col name
+  lat <- mean(data$Latitude, na.rm = T)
+  return(get_map(location = c(lon = long, lat = lat), zoom = 7, scale = 2)) #zoom and scale will change based on loc
+}
+
+#Produces series of plots of every hour
+make_day <- function(data, map) {
+  hrs <- names(data)[startsWith(names(data), 'Hour')]
+  day.list <- map(hrs, ~traf_map(map = map, data = data, col = .))
+}
+
+make_gif <- function(data, map) {
+  img <- image_graph(600, 400, res = 96)
+  plts <- make_day(data, map)
+  walk(plts, plot) #add all the maps to the image device
+  dev.off()
+  animation <- image_animate(img, fps = '2')
+}
+
+###################   
 ## Functions for interacting w/MySQL
 ###################
 
 
-fields <- dbListFields(mydb, 'observation')
+fields <- dbListFields(mydb, 'traffic.observation')
 
 get_statement <- function(vec) {
   values <- paste(vec, collapse = '\', \'')
